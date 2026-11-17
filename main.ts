@@ -42,7 +42,7 @@ if (!existsSync(inputFile)) {
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const { board, radar, calibration } = buildRadar(snapshot);
+const { board, radar, calibration, validation } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
   process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
@@ -86,6 +86,8 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: calibration global median mcap/TVL ${calibration.global_median}, ${calibration.by_category.length} categories\n` +
+    `token radar: curve log10(mcap) = ${calibration.fit.intercept.toFixed(4)} + ${calibration.fit.slope.toFixed(4)} x log10(tvl), ${calibration.fit.comps} comps\n` +
+    `token radar: blind test median error ${validation.blind.median_factor}x (${validation.blind.within_2x}% within 2x, Spearman ${validation.blind.spearman}), flat multiple ${validation.flat_blind.median_factor}x; LOO ${validation.loo.median_factor}x vs flat ${validation.flat_loo.median_factor}x\n` +
+    `token radar: verdicts farm ${radar.verdict_counts.farm}, thin ${radar.verdict_counts.thin}, skip ${radar.verdict_counts.skip}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
