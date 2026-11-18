@@ -1,7 +1,13 @@
-// Token Radar's dashboard, model radar-4. It reads window.RADAR (written beside dashboard/ by
+// Token Radar's dashboard, model radar-5. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail drawer with
 // the model's own inputs and the protocol's netted farm plan, the fitted curve's blind test,
 // a calibration table, and a what-if sandbox. No network: every byte it shows is in data.js.
+//
+// What radar-5 adds: an expected-value column (launch likelihood x implied value - cost),
+// a p10-p90 value range per row, a scatter of TVL against implied value, a category table
+// that shows each category's token rate, and a separation panel that accounts for every one
+// of the 758 protocols in the snapshot. The board still ranks by implied value; expected
+// value is a second lens, and the verdict now follows expected value per dollar farmed.
 //
 // The page recomputes a row from the snapshot figures and checks the number board.json
 // carries, so the page's code and the board's data are visibly the same arithmetic. The sandbox
@@ -13,7 +19,7 @@
   if (!DATA) return;
   var app = document.getElementById('board');
   var state = { q: '', category: 'all', chain: 'all', verdict: 'all', watchlistOnly: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null, sandbox: null };
-  var SANDBOX_DEFAULTS = { scale: 1, growthWeight: 1.0, maturityFloor: 0.8 };
+  var SANDBOX_DEFAULTS = { scale: 1, growthWeight: 0.6, maturityFloor: 0.8 };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -54,18 +60,6 @@
     var maturity = floor + (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * range;
     var mult = row.multiple * (sb ? sb.scale : 1);
     return Math.max(1, Math.round(row.tvl_usd * mult * growthMult * maturity));
-  }
-  function growthMultOf(row, sb) {
-    var m = DATA.model;
-    var growth = clamp(row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d, m.growth_floor, m.growth_cap);
-    return 1 + (growth / 100) * (sb ? sb.growthWeight : m.growth_weight);
-  }
-  function maturityMultOf(row, sb) {
-    var m = DATA.model;
-    var age = row.age_days === null || row.age_days === undefined ? m.unknown_age_days : row.age_days;
-    var floor = sb ? sb.maturityFloor : m.maturity_floor;
-    var range = sb ? (1 - sb.maturityFloor) : m.maturity_range;
-    return floor + (Math.min(Math.max(age, 0), m.maturity_days) / m.maturity_days) * range;
   }
 
   function el(tag, attrs) {
@@ -244,6 +238,8 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'multiple') { av = a.multiple; bv = b.multiple; }
+      else if (key === 'ev') { av = a.expected_value_usd; bv = b.expected_value_usd; }
+      else if (key === 'likelihood') { av = a.launch_likelihood; bv = b.launch_likelihood; }
       else if (key === 'verdict') { av = verdictOrder(a.verdict); bv = verdictOrder(b.verdict); }
       else if (key === 'cost') { av = a.total_cost_usd; bv = b.total_cost_usd; }
       else { av = sb ? impliedOf(a, sb) : a.implied_value_usd; bv = sb ? impliedOf(b, sb) : b.implied_value_usd; }
@@ -280,7 +276,7 @@
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
         el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor, every one the snapshot holds. Implied value is a model, not a promise.' }),
-        el('p', { text: 'Each protocol carries an eight-step farm plan netted to the dollar, with a verdict: farm (' + DATA.verdict_counts.farm + '), thin (' + DATA.verdict_counts.thin + ') or skip (' + DATA.verdict_counts.skip + '). Select any row for its model, its cost and its plan.' })
+        el('p', { text: 'Each protocol carries an eight-step farm plan netted to the dollar, with a verdict: farm (' + DATA.verdict_counts.farm + '), thin (' + DATA.verdict_counts.thin + ') or skip (' + DATA.verdict_counts.skip + '). Select any row for its model, its cost and its plan. Value alone does not say whether to farm: expected value — launch likelihood times implied value, minus the cost to farm — is the second lens, and the verdict follows expected value per dollar farmed. A fortune that never launches is worth nothing.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -382,6 +378,8 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((value / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(value) })
         )),
+        el('td', { class: 'num', text: fmtUsd(r.expected_value_usd) }),
+        el('td', { class: 'num', text: Math.round(r.launch_likelihood * 100) + '%' }),
         el('td', null, el('span', { class: 'status', text: 'no token' })),
         el('td', null, verdictBadge(r.verdict)),
         el('td', { class: 'num', text: fmtMoney(r.total_cost_usd) }),
@@ -392,7 +390,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: sandboxActive() ? 'Preview re-ranked by the sandbox constants below. Select a row for its model and farm plan.' : 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
+          el('caption', { class: 'sub', text: sandboxActive() ? 'Preview re-ranked by the sandbox constants below. Select a row for its model and farm plan.' : 'Pre-token protocols, strongest implied value first. Expected value is launch likelihood x implied value, minus the cost to farm — sort by it to see the best farm, not the biggest value. Select a row for its model and farm plan.' }),
           el('thead', null, el('tr', null,
             sortHeader('implied', 'Rank'),
             sortHeader('name', 'Protocol'),
@@ -401,6 +399,8 @@
             sortHeader('age', 'Age'),
             sortHeader('multiple', 'Multiple'),
             sortHeader('implied', 'Implied value'),
+            sortHeader('ev', 'Expected value'),
+            sortHeader('likelihood', 'Launch %'),
             el('th', { scope: 'col', text: 'Token' }),
             sortHeader('verdict', 'Verdict'),
             sortHeader('cost', 'To farm'),
@@ -459,7 +459,9 @@
       el('div', { class: 'formula' },
         'implied = round( curve(tvl_usd) x factor(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      el('p', { class: 'sub', text: 'Curve(tvl) is the least-squares fit of log10(market cap) on log10(TVL) over ' + fit.comps + ' live-token protocols, one per ticker: log10(mcap) = ' + fit.intercept.toFixed(4) + ' + ' + fit.slope.toFixed(4) + ' x log10(tvl). The slope is shrunk toward 0.5 (the square-root law) with ' + m.slope_shrink_k + ' pseudo-observations, because 118 comps cannot pin it precisely — the shrunk slope predicts held-out comps better on every split tested. The slope is far below 1, so a token grows much slower than its TVL; a flat multiple would price the largest protocols ten times too high. Factor(category) is the median of mcap / curve(tvl) for live tokens in that category, shrunk toward 1.0 with ' + m.shrinkage_k + ' pseudo-observations and capped at ' + m.factor_cap.toFixed(1) + 'x. A category needs at least ' + m.min_live + ' live tokens to earn its own factor; thinner categories use 1.0. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      el('p', { class: 'sub', text: 'Curve(tvl) is the least-squares fit of log10(market cap) on log10(TVL) over ' + fit.comps + ' live-token protocols, one per ticker: log10(mcap) = ' + fit.intercept.toFixed(4) + ' + ' + fit.slope.toFixed(4) + ' x log10(tvl). The slope is shrunk toward 0.5 (the square-root law) with ' + m.slope_shrink_k + ' pseudo-observations, because 118 comps cannot pin it precisely — the shrunk slope predicts held-out comps better on every split tested. The slope is far below 1, so a token grows much slower than its TVL; a flat multiple would price the largest protocols ten times too high. Factor(category) is the median of mcap / curve(tvl) for live tokens in that category, shrunk toward 1.0 with ' + m.shrinkage_k + ' pseudo-observations and capped at ' + m.factor_cap.toFixed(1) + 'x. A category needs at least ' + m.min_live + ' live tokens to earn its own factor; thinner categories use 1.0. TVL and seven-day growth come from the snapshot. The growth weight is 0.6, not 1.0: the week\u2019s move is half signal, half noise, and blind tests show the half weight predicting held-out tokens better. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      el('p', { class: 'sub', text: 'Value is not the farm decision. Launch likelihood is the category\u2019s own token rate — the share of protocols in that category that already record a token, shrunk toward the global ' + (DATA.calibration.launch_global * 100).toFixed(0) + '% with ' + m.launch_shrink_k + ' pseudo-observations — times an age factor that falls from 1.0 to ' + m.age_factor_floor + ' over ' + m.age_decay_days + ' days with no token. Categories differ enormously: Lending launches most of the time, Risk Curators rarely. Expected value is likelihood x implied value, minus the cost to farm. The verdict compares expected value per dollar farmed against the board\u2019s own thirds, so farm means the best expected return per dollar, not the biggest value. The likelihood is a model score, not a measured rate — no future launches exist in a sealed snapshot to test it against — and the board says so. What is blind-tested is the implied value underneath it.' }),
+      el('p', { class: 'sub', text: 'Every implied value carries its honest range: p10 to p90 of the comps\u2019 own residuals around the curve, ' + DATA.validation.residual_p10.toFixed(3) + 'x to ' + DATA.validation.residual_p90.toFixed(3) + 'x. A row worth $10M on the curve is plausibly worth $0.7M to $96M. The range is in each row\u2019s detail view; a point estimate without it would pretend the model knows more than it does.' }),
       el('div', { class: 'calib-wrap' },
         el('table', { class: 'calib' },
           el('caption', { class: 'sub', text: 'Calibration: one row per category on the board, computed from this snapshot. Raw is the median residual against the curve; factor is what the model uses.' }),
@@ -484,21 +486,110 @@
       );
     }
     return el('section', { class: 'panel model validation' },
-      el('h2', { text: 'Tested blind: does the curve actually predict tokens?' }),
-      el('p', { class: 'sub', text: 'The model is fitted on live tokens and then tested on tokens it never saw. Leave-one-out refits the curve ' + fit.comps + ' times, once per token. The blind split fits on half the tokens (even slugs) and predicts the other half. The flat multiple is the previous model, tested the same way, so the comparison is on the same data.' }),
+      el('h2', { text: 'Tested blind: does the model actually predict tokens?' }),
+      el('p', { class: 'sub', text: 'The model is fitted on live tokens and then tested on tokens it never saw. Leave-one-out refits the curve ' + fit.comps + ' times, once per token. The blind split fits on half the tokens (even slugs) and predicts the other half. The flat multiple is the previous model, tested the same way, so the comparison is on the same data. This version tests the full predictor — curve, category factor, growth and maturity, exactly as the board scores a row — not just the curve.' }),
       el('div', { class: 'calib-wrap' },
         el('table', { class: 'calib' },
           el('caption', { class: 'sub', text: 'Prediction error is the factor between the predicted and the actual market cap. Lower is better.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Tokens' }), el('th', { scope: 'col', text: 'Median error' }), el('th', { scope: 'col', text: 'Within 2x' }), el('th', { scope: 'col', text: 'Within 3x' }), el('th', { scope: 'col', text: 'Rank correlation' }))),
           el('tbody', null,
-            row('Fitted curve, leave-one-out', v.loo),
-            row('Fitted curve, blind split', v.blind),
+            row('Full predictor, leave-one-out', v.loo),
+            row('Full predictor, blind split', v.blind),
             row('Flat multiple, leave-one-out', v.flat_loo),
             row('Flat multiple, blind split', v.flat_blind)
           )
         )
       ),
-      el('p', { class: 'sub', text: 'Read it plainly: on the blind split the curve is off by a median factor of ' + v.blind.median_factor.toFixed(2) + 'x, against ' + v.flat_blind.median_factor.toFixed(2) + 'x for the flat multiple — about a 40% smaller error, but individual tokens still vary a hundred-fold around the curve. The ranking is a comps estimate, not a price, and the wide error is why the board shows the whole curve, not just the top row.' })
+      el('p', { class: 'sub', text: 'Read it plainly: on the blind split the model is off by a median factor of ' + v.blind.median_factor.toFixed(2) + 'x, against ' + v.flat_blind.median_factor.toFixed(2) + 'x for the flat multiple — about a 40% smaller error, but individual tokens still vary a hundred-fold around the curve. The ranking is a comps estimate, not a price, and the wide error is why every row carries its p10–p90 range (' + v.residual_p10.toFixed(3) + 'x to ' + v.residual_p90.toFixed(3) + 'x around the curve), not just a point value.' })
+    );
+  }
+
+  function separationPanel() {
+    var s = DATA.separation;
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'How the radar separates trading tokens from pre-token protocols' }),
+      el('p', { class: 'sub', text: 'The snapshot holds ' + s.total + ' protocols. ' + s.live_token + ' of them already record a token, so they are set aside: their market cap is a fact, not a model, and it is what calibrates the ranking. ' + s.pre_token + ' record no token at all. The board ranks ' + DATA.board_size + ' of those: the ' + DATA.watchlist_size + ' on the watchlist plus every rankable pre-token protocol below the floor. The ' + (s.pre_token - DATA.board_size) + ' left out are not hidden: ' + s.excluded_cex + ' are exchanges, ' + s.excluded_versioned + ' are versioned pools of another protocol, and ' + s.excluded_large + ' are large protocols the watchlist leaves out because they are wrapped, staked or bridged versions of a protocol that already has a token — their value already trades elsewhere.' }),
+      el('div', { class: 'facts' },
+        el('div', { class: 'fact' }, el('span', { text: 'Protocols in the snapshot' }), el('b', { text: String(s.total) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Already record a token' }), el('b', { text: String(s.live_token) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Record no token' }), el('b', { text: String(s.pre_token) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Ranked on this board' }), el('b', { text: String(DATA.board_size) }))
+      )
+    );
+  }
+
+  function scatterPanel() {
+    var W = 680, H = 340, P = 44;
+    var rows = DATA.rows;
+    var xs = rows.map(function (r) { return Math.log10(Math.max(1, r.tvl_usd)); });
+    var ys = rows.map(function (r) { return Math.log10(Math.max(1, r.implied_value_usd)); });
+    var x0 = Math.floor(Math.min.apply(null, xs)), x1 = Math.ceil(Math.max.apply(null, xs));
+    var y0 = Math.floor(Math.min.apply(null, ys)), y1 = Math.ceil(Math.max.apply(null, ys));
+    function X(x) { return P + (x - x0) / (x1 - x0) * (W - 2 * P); }
+    function Y(y) { return H - P - (y - y0) / (y1 - y0) * (H - 2 * P); }
+    var fit = DATA.calibration.fit;
+    var curve = '';
+    for (var i = 0; i <= 24; i++) {
+      var x = x0 + (x1 - x0) * i / 24;
+      curve += (i === 0 ? 'M' : 'L') + X(x).toFixed(1) + ' ' + Y(fit.intercept + fit.slope * x).toFixed(1);
+    }
+    var ticks = '';
+    for (var tx = x0; tx <= x1; tx++) {
+      ticks += '<line class="axis" x1="' + X(tx).toFixed(1) + '" y1="' + (H - P) + '" x2="' + X(tx).toFixed(1) + '" y2="' + P + '"/><text class="tick" x="' + X(tx).toFixed(1) + '" y="' + (H - P + 16) + '">' + fmtUsd(Math.pow(10, tx)) + '</text>';
+    }
+    for (var ty = y0; ty <= y1; ty++) {
+      ticks += '<line class="axis" x1="' + P + '" y1="' + Y(ty).toFixed(1) + '" x2="' + (W - P) + '" y2="' + Y(ty).toFixed(1) + '"/><text class="tick" x="' + (P - 6) + '" y="' + (Y(ty) + 4).toFixed(1) + '">' + fmtUsd(Math.pow(10, ty)) + '</text>';
+    }
+    var dots = rows.map(function (r) {
+      return '<circle cx="' + X(Math.log10(Math.max(1, r.tvl_usd))).toFixed(1) + '" cy="' + Y(Math.log10(Math.max(1, r.implied_value_usd))).toFixed(1) + '" r="' + (r.watchlist ? 3.4 : 2.2) + '" class="' + (r.watchlist ? 'dot-wl' : 'dot') + '"><title>' + r.name + ': TVL ' + fmtUsd(r.tvl_usd) + ', implied ' + fmtUsd(r.implied_value_usd) + '</title></circle>';
+    }).join('');
+    var svg = '<svg class="scatter" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="TVL against implied value, log scale">' + ticks +
+      '<path class="curve" d="' + curve + '"/>' + dots +
+      '<text class="tick" x="' + (W / 2) + '" y="' + (H - 6) + '">TVL (log scale)</text>' +
+      '<text class="tick" x="12" y="' + (H / 2) + '" transform="rotate(-90 12 ' + (H / 2) + ')">Implied value (log scale)</text></svg>';
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'TVL against implied value' }),
+      el('p', { class: 'sub', text: 'Every row on the board, log scale on both axes. The line is the fitted curve: value grows with the square root of TVL, not in proportion to it. Dots above the line are priced richer than the curve for their TVL; dots below it, cheaper. Large dots are watchlist protocols.' }),
+      el('div', { html: svg })
+    );
+  }
+
+  function categoryPanel() {
+    var cal = DATA.calibration;
+    var byCat = {};
+    DATA.rows.forEach(function (r) {
+      var c = r.category || 'Other';
+      if (!byCat[c]) byCat[c] = { n: 0, sum: 0 };
+      byCat[c].n++;
+      byCat[c].sum += r.implied_value_usd;
+    });
+    var factorOf = {};
+    cal.by_category.forEach(function (f) { factorOf[f.category] = f; });
+    var list = cal.launch_by_category.filter(function (l) { return byCat[l.category]; })
+      .sort(function (a, b) { return byCat[b.category].sum / byCat[b.category].n - byCat[a.category].sum / byCat[a.category].n; });
+    var tbody = el('tbody');
+    list.forEach(function (l) {
+      var f = factorOf[l.category] || { multiple: 1, live_count: 0 };
+      tbody.appendChild(el('tr', null,
+        el('td', { text: l.category }),
+        el('td', { class: 'num', text: String(byCat[l.category].n) }),
+        el('td', { class: 'num', text: String(f.live_count) }),
+        el('td', { class: 'num', text: (l.raw_rate * 100).toFixed(0) + '%' }),
+        el('td', { class: 'num', text: (l.rate * 100).toFixed(0) + '%' }),
+        el('td', { class: 'num', text: f.multiple.toFixed(2) + 'x' }),
+        el('td', { class: 'num', text: fmtUsd(byCat[l.category].sum / byCat[l.category].n) })
+      ));
+    });
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'Categories: who launches, who is priced rich, who is worth most' }),
+      el('p', { class: 'sub', text: 'Token rate is the share of protocols in the category that already record a token — the raw material of launch likelihood. Likelihood used is that rate shrunk toward the global ' + (cal.launch_global * 100).toFixed(0) + '%. Factor is what the model multiplies the curve by. Average implied value is the mean of the category\u2019s rows on this board.' }),
+      el('div', { class: 'calib-wrap' },
+        el('table', { class: 'calib' },
+          el('caption', { class: 'sub', text: 'One row per category on the board. A category can be worth a lot and still rarely launch — that is the point of the expected value column.' }),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'On board' }), el('th', { scope: 'col', text: 'Live tokens' }), el('th', { scope: 'col', text: 'Token rate' }), el('th', { scope: 'col', text: 'Likelihood used' }), el('th', { scope: 'col', text: 'Factor' }), el('th', { scope: 'col', text: 'Avg implied' }))),
+          tbody
+        )
+      )
     );
   }
 
@@ -539,12 +630,16 @@
     dialog.textContent = '';
     var steps = farmSteps(row);
     var recomputed = impliedOf(row, null);
-    var perDollar = row.total_cost_usd > 0 ? Math.round(row.implied_value_usd / row.total_cost_usd) : 0;
+    var evPerDollar = row.total_cost_usd > 0 ? Math.round(row.expected_value_usd / row.total_cost_usd) : 0;
     var verdictLine = row.verdict === 'farm'
-      ? 'Farm: the highest implied value per dollar farmed on this board.'
+      ? 'Farm: the highest expected value per dollar farmed on this board.'
       : row.verdict === 'thin'
-        ? 'Thin: worth a small position, not a full one — mid-range value per dollar farmed.'
-        : 'Skip: the lowest value per dollar farmed on this board — the cost outweighs the modelled value.';
+        ? 'Thin: worth a small position, not a full one — mid-range expected value per dollar farmed.'
+        : 'Skip: the lowest expected value per dollar farmed on this board — the cost outweighs the modelled value.';
+    var comps = (DATA.calibration.category_comps || []).filter(function (c) { return c.category === (row.category || 'Other'); })[0];
+    var compList = comps && comps.comps.length
+      ? comps.comps.map(function (c) { return el('li', null, el('b', { text: c.name }), el('span', { class: 'cost', text: 'TVL ' + fmtUsd(c.tvl_usd) + ', mcap ' + fmtUsd(c.mcap_usd) + ', ' + c.multiple.toFixed(2) + 'x' })); })
+      : [el('li', { text: 'No live-token comps in this category — the factor is 1.0.' })];
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + (row.watchlist ? ' - watchlist' : ' - early find') }),
@@ -564,13 +659,29 @@
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
-        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
+        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'Honest range (p10–p90)' }), el('b', { class: 'num', text: fmtUsd(row.range_lo_usd) + ' – ' + fmtUsd(row.range_hi_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price. The range is the comps\u2019 own spread around the curve: nine in ten live tokens land inside it, one in ten outside.' })
+    ));
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Expected value: is it worth farming?' }),
+      el('p', { class: 'sub', text: 'Launch likelihood ' + Math.round(row.launch_likelihood * 100) + '% — the ' + (row.category || 'Other') + ' token rate times the age factor — times the implied value, minus the cost to farm. That is ' + fmtUsd(row.expected_value_usd) + ' of expected value for ' + fmtMoney(row.total_cost_usd) + ' spent, or ' + fmtUsd(evPerDollar) + ' per $1 farmed. The likelihood is a model score, not a measured rate: no future launches exist in the snapshot to test it against. What is blind-tested is the implied value underneath it.' }),
+      el('div', { class: 'equation' },
+        el('div', null, el('span', { text: 'Launch likelihood' }), el('b', { class: 'num', text: Math.round(row.launch_likelihood * 100) + '%' })),
+        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'Cost to farm' }), el('b', { class: 'num', text: fmtMoney(row.total_cost_usd) })),
+        el('div', null, el('span', { text: 'Expected value' }), el('b', { class: 'num', text: fmtUsd(row.expected_value_usd) }))
+      )
+    ));
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'The live tokens behind this row' }),
+      el('p', { class: 'sub', text: 'These are the live-token protocols in ' + (row.category || 'Other') + ' that set the category factor of ' + row.category_factor.toFixed(2) + 'x. The factor is the median of their market cap against the curve, shrunk toward 1.0 — so this row is priced by these tokens, not by a typed-in number.' }),
+      el('ol', { class: 'steps' }, compList)
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
-      el('p', { class: 'sub', text: verdictLine + ' Total to farm: ' + fmtMoney(row.total_cost_usd) + ' — ' + fmtMoney(row.capital_usd) + ' capital and about ' + fmtMoney(row.gas_total_usd) + ' gas. That is ' + fmtUsd(perDollar) + ' of implied value per $1 farmed.' }),
+      el('p', { class: 'sub', text: verdictLine + ' Total to farm: ' + fmtMoney(row.total_cost_usd) + ' — ' + fmtMoney(row.capital_usd) + ' capital and about ' + fmtMoney(row.gas_total_usd) + ' gas. That is ' + fmtUsd(evPerDollar) + ' of expected value per $1 farmed.' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
         var at = s.indexOf(' Cost: ');
         var action = at >= 0 ? s.slice(0, at) : s;
@@ -590,6 +701,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(separationPanel());
     shell.appendChild(controls());
     if (sandboxActive()) {
       shell.appendChild(el('div', { class: 'banner on' },
@@ -600,6 +712,8 @@
     }
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') {
+      shell.appendChild(scatterPanel());
+      shell.appendChild(categoryPanel());
       shell.appendChild(modelPanel());
       shell.appendChild(validationPanel());
       shell.appendChild(sandboxPanel());

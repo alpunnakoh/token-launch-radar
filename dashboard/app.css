@@ -177,6 +177,12 @@ tbody tr[data-selected="true"] { background: var(--accent-soft); }
 .steps b { display: block; font-weight: 550; }
 .cost { color: var(--muted); font-size: 12px; font-family: var(--font-num); }
 .foot { margin-top: var(--step-5); color: var(--muted); font-size: 12px; }
+.scatter { width: 100%; height: auto; display: block; }
+.scatter .axis { stroke: var(--border); stroke-width: 1; }
+.scatter .curve { stroke: var(--ink); fill: none; stroke-width: 1.5; }
+.scatter .dot { fill: var(--muted); opacity: 0.55; }
+.scatter .dot-wl { fill: var(--accent); }
+.scatter .tick { fill: var(--muted); font-size: 11px; font-family: var(--font-num); text-anchor: middle; }
 
 @media (max-width: 900px) {
   .shell { padding: var(--step-4); }

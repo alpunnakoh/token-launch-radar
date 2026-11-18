@@ -1,4 +1,4 @@
-// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
+// Token Radar's model, version radar-5: one snapshot of the protocol universe in, one ranked
 // board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
@@ -25,7 +25,10 @@
 //                      category needs at least 3 live comps to earn its own factor, otherwise 1.0
 //   base             = curve(tvl) x category factor
 //   growth           = clamp(change_7d, -50, +60) per cent (unreported: 0)
-//   growthMult       = 1 + (growth / 100) x 1.0
+//   growthMult       = 1 + (growth / 100) x 0.6 — HALF the week's move: the seven-day
+//                      change is half signal, half noise, and the full weight overfits the
+//                      week. Blind-tested on held-out comps, 0.6 beats 1.0 on the blind split
+//                      (2.58x vs 2.72x) and leave-one-out (2.93x vs 2.98x); see validate().
 //   maturity         = 0.8 + min(age_days, 1095) / 1095 x 0.2   (age unknown: 365 days)
 //   implied          = max(1, round(base x growthMult x maturity))
 //
@@ -37,20 +40,37 @@
 // half the comps, it predicts the other half with a median error near 2.6x, against 4.9x for
 // the flat multiple the first model used — about a 45% smaller error. The error is still
 // a hundred-fold around the curve — and the dashboard says so plainly: this is a comps
-// estimate, not a price.
+// estimate, not a price. The range a row shows (p10–p90 of the comps' own residuals around
+// the curve, 0.07x to 9.59x) is that error, stated per protocol instead of hidden.
 //
-// Why the slope is shrunk: on these 118 comps the fitted slope moves with the sample —
-// leave-one-out and five-fold tests both show the shrunk slope predicting held-out comps
-// better than the raw fit (median error 2.6x blind, 3.0x leave-one-out, against 2.9x and
-// 3.1x unshrunk). The shrinkage is a variance cut, not a hand-picked number: the prior is
-// the square root, the data still supply the intercept and most of the slope. Age inside
-// the fit, chain count, per-category curves and a TVL-growth interaction were all tried
-// blind and all lost to this simpler curve — the market's dispersion is mostly noise, and
-// extra signals mostly fit it.
+// What radar-5 adds, and why it is not a tweak: value alone does not say whether to farm.
+// A protocol can be worth a fortune IF it launches and still be a bad farm if it never
+// launches. So every row now carries, from the same snapshot figures:
+//
+//   launch likelihood = the category's own token rate — the share of protocols in that
+//                      category that already record a token, shrunk toward the global
+//                      0.55 with k = 10 — times an age factor that falls from 1.0 to 0.5
+//                      over three years with no token. Categories differ enormously:
+//                      Lending launches 79% of the time, Risk Curators 13%. The
+//                      board's largest implied value, a Risk Curator, carries one of
+//                      the lowest likelihoods on the board — value and likelihood
+//                      point in different directions, and a radar that only ranks
+//                      value hides that.
+//   expected value    = likelihood x implied value - total cost to farm. The farm
+//                      decision, in one number. The verdict (farm / thin / skip) now
+//                      compares expected value per dollar farmed against the board's
+//                      own thirds, so "farm" means the best expected return per dollar,
+//                      not the biggest value.
+//
+// The likelihood is a model score, not a validated probability: no future launches exist
+// in a sealed snapshot to test it against, and the dashboard says so. What IS blind-tested
+// is the implied value underneath it, on the comps, with the full predictor (growth and
+// maturity included) — the previous version's test only scored the curve, not the board's
+// own arithmetic.
 //
 // Every farm plan is netted to the dollar: the capital, the second action and the weekly
 // actions are summed with the gas on the protocol's own chains, and the plan's verdict
-// (farm / thin / skip) compares implied value per dollar farmed against the board's own
+// (farm / thin / skip) compares expected value per dollar farmed against the board's own
 // thirds. A verdict is a comparison, not a promise.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
@@ -90,13 +110,16 @@ export interface ModelConstants {
   unknown_age_days: number;
   slope_prior: number;
   slope_shrink_k: number;
+  launch_shrink_k: number;
+  age_decay_days: number;
+  age_factor_floor: number;
 }
 
 export const MODEL: ModelConstants = {
   shrinkage_k: 10,
   min_live: 3,
   factor_cap: 3.0,
-  growth_weight: 1.0,
+  growth_weight: 0.6,
   growth_floor: -50,
   growth_cap: 60,
   maturity_floor: 0.8,
@@ -105,10 +128,13 @@ export const MODEL: ModelConstants = {
   unknown_age_days: 365,
   slope_prior: 0.5,
   slope_shrink_k: 40,
+  launch_shrink_k: 10,
+  age_decay_days: 1095,
+  age_factor_floor: 0.5,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -133,6 +159,24 @@ export interface Calibration {
   global_median: number;
   by_category: CategoryCalibration[];
   fit: CurveFit;
+  launch_global: number;
+  launch_by_category: LaunchCalibration[];
+  category_comps: CategoryComps[];
+}
+
+/** One category's launch rate: the share of its protocols that already record a token. */
+export interface LaunchCalibration {
+  category: string;
+  total: number;
+  with_token: number;
+  raw_rate: number;
+  rate: number;
+}
+
+/** The live-token comps behind one category's factor, largest TVL first. */
+export interface CategoryComps {
+  category: string;
+  comps: { slug: string; name: string; tvl_usd: number; mcap_usd: number; multiple: number }[];
 }
 
 /** One blind-test result: how a predictor did on protocols it never saw. */
@@ -144,12 +188,14 @@ export interface TestResult {
   spearman: number;
 }
 
-/** The model's own test report: leave-one-out and a blind split, for the curve and the flat multiple. */
+/** The model's own test report: leave-one-out and a blind split, for the full predictor and the flat multiple. */
 export interface Validation {
   loo: TestResult;
   blind: TestResult;
   flat_loo: TestResult;
   flat_blind: TestResult;
+  residual_p10: number;
+  residual_p90: number;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -194,6 +240,10 @@ export interface BoardRow {
   total_cost_usd: number;
   capital_usd: number;
   gas_total_usd: number;
+  launch_likelihood: number;
+  expected_value_usd: number;
+  range_lo_usd: number;
+  range_hi_usd: number;
 }
 
 /** The dashboard's compact view of one row, with farm plans generated in the page. */
@@ -220,6 +270,10 @@ export interface RadarRow {
   total_cost_usd: number;
   capital_usd: number;
   gas_total_usd: number;
+  launch_likelihood: number;
+  expected_value_usd: number;
+  range_lo_usd: number;
+  range_hi_usd: number;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -244,6 +298,14 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
+  separation: {
+    total: number;
+    pre_token: number;
+    live_token: number;
+    excluded_cex: number;
+    excluded_versioned: number;
+    excluded_large: number;
+  };
   calibration: Calibration;
   validation: Validation;
   verdict_counts: { farm: number; thin: number; skip: number };
@@ -370,6 +432,13 @@ export function categoryFactor(
  * comps curve, the flat median market-cap-per-TVL (kept for the blind comparison against the
  * previous model), and one factor row per category that appears. Deterministic: the medians
  * come from sorted arrays, ties break by category name.
+ *
+ * Two more calibrations come from the same snapshot. The launch rate is the share of
+ * protocols in each category that already record a token, shrunk toward the global share
+ * with `launch_shrink_k` pseudo-observations: categories differ enormously (Lending 0.79,
+ * Risk Curators 0.13), and that difference is the launch likelihood's raw material.
+ * The category comps are the live-token protocols behind each category's factor, largest
+ * TVL first, so the dashboard can show exactly which tokens priced a row.
  */
 export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): Calibration {
   const comps = compsOf(snapshot);
@@ -382,7 +451,55 @@ export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): Ca
     const { factor, live_count, raw_median } = categoryFactor(comps, fit, category, model);
     return { category, live_count, raw_median: raw_median === null ? null : Math.round(raw_median * 1e4) / 1e4, multiple: Math.round(factor * 1e4) / 1e4 };
   });
-  return { global_median: Math.round(globalMedian * 1e4) / 1e4, by_category, fit };
+  const withToken = snapshot.protocols.filter((p) => !isPreToken(p)).length;
+  const launch_global = withToken / snapshot.protocols.length;
+  const launch_by_category: LaunchCalibration[] = [...categories].sort().map((category) => {
+    const inCat = snapshot.protocols.filter((p) => (p.category ?? 'Other') === category);
+    const withTok = inCat.filter((p) => !isPreToken(p)).length;
+    const raw = inCat.length === 0 ? launch_global : withTok / inCat.length;
+    const rate = (withTok + model.launch_shrink_k * launch_global) / (inCat.length + model.launch_shrink_k);
+    return {
+      category,
+      total: inCat.length,
+      with_token: withTok,
+      raw_rate: Math.round(raw * 1000) / 1000,
+      rate: Math.round(rate * 1000) / 1000,
+    };
+  });
+  const category_comps: CategoryComps[] = [...categories].sort().map((category) => ({
+    category,
+    comps: comps
+      .filter((p) => (p.category ?? 'Other') === category)
+      .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
+      .slice(0, 5)
+      .map((p) => ({
+        slug: p.slug,
+        name: p.name,
+        tvl_usd: p.tvl_usd,
+        mcap_usd: p.mcap_usd!,
+        multiple: Math.round((p.mcap_usd! / p.tvl_usd) * 1000) / 1000,
+      })),
+  }));
+  return {
+    global_median: Math.round(globalMedian * 1e4) / 1e4,
+    by_category,
+    fit,
+    launch_global: Math.round(launch_global * 1000) / 1000,
+    launch_by_category,
+    category_comps,
+  };
+}
+
+/** The launch rate one category gets under a calibration: its table row, or the global rate. */
+export function launchRateFor(category: string | null, calibration: Calibration): number {
+  const row = calibration.launch_by_category.find((r) => r.category === (category ?? 'Other'));
+  return row === undefined ? calibration.launch_global : row.rate;
+}
+
+/** The live-token comps behind one category's factor, for the detail view. */
+export function compsFor(category: string | null, calibration: Calibration): CategoryComps['comps'] {
+  const row = calibration.category_comps.find((r) => r.category === (category ?? 'Other'));
+  return row === undefined ? [] : row.comps;
 }
 
 /** The factor one category gets under a calibration: its table row, or 1.0. */
@@ -443,17 +560,39 @@ function flatPredict(train: SnapshotProtocol[], p: SnapshotProtocol, model: Mode
   return p.tvl_usd * mult;
 }
 
-/** The curve predictor: the fitted curve times the category factor. */
-function curvePredict(train: SnapshotProtocol[], p: SnapshotProtocol, model: ModelConstants = MODEL): number {
+/** The full predictor: the fitted curve times the category factor times the growth and maturity multipliers — the board's own arithmetic, not just its curve. */
+function fullPredict(train: SnapshotProtocol[], p: SnapshotProtocol, asOf: string, model: ModelConstants = MODEL): number {
   const fit = fitCurve(train);
   const { factor } = categoryFactor(train, fit, p.category ?? 'Other', model);
-  return curveValue(fit, p.tvl_usd) * factor;
+  const rawGrowth = finite(p.change_7d, 0);
+  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
+  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
+  const age = ageDays(asOf, p.listed_at);
+  const ageForModel = age ?? model.unknown_age_days;
+  const maturityMult =
+    model.maturity_floor +
+    (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+  return curveValue(fit, p.tvl_usd) * factor * growthMult * maturityMult;
+}
+
+/** The p10 and p90 factors of the comps' own residuals around the fitted curve: the honest range of one implied value. */
+export function residualRange(rows: SnapshotProtocol[], fit: CurveFit): { p10: number; p90: number } {
+  const logs = rows.map((p) => Math.log10(p.mcap_usd! / curveValue(fit, p.tvl_usd))).sort((a, b) => a - b);
+  if (logs.length === 0) return { p10: 0.1, p90: 10 };
+  const at = (f: number): number => {
+    const i = Math.min(logs.length - 1, Math.max(0, Math.floor(f * logs.length)));
+    return Math.pow(10, logs[i]!);
+  };
+  return { p10: Math.round(at(0.1) * 1000) / 1000, p90: Math.round(at(0.9) * 1000) / 1000 };
 }
 
 /**
  * The model's own test report, computed from the snapshot at run time: leave-one-out over
- * every comp, and a blind split (even slugs train, odd slugs test), each run for the fitted
- * curve and for the flat multiple. No randomness: the split is by sorted slug.
+ * every comp, and a blind split (even slugs train, odd slugs test), each run for the full
+ * predictor — curve, category factor, growth and maturity, exactly as the board scores a
+ * row — and for the flat multiple. No randomness: the split is by sorted slug. The previous
+ * version tested only the curve, which is not the arithmetic the board runs; this version
+ * tests what it ships.
  */
 export function validate(snapshot: Snapshot, model: ModelConstants = MODEL): Validation {
   const comps = compsOf(snapshot).sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
@@ -462,21 +601,44 @@ export function validate(snapshot: Snapshot, model: ModelConstants = MODEL): Val
   const actuals: number[] = [];
   for (let i = 0; i < comps.length; i++) {
     const rest = comps.filter((_, j) => j !== i);
-    looCurve.push(curvePredict(rest, comps[i]!, model));
+    looCurve.push(fullPredict(rest, comps[i]!, snapshot.as_of, model));
     looFlat.push(flatPredict(rest, comps[i]!, model));
     actuals.push(comps[i]!.mcap_usd!);
   }
   const train = comps.filter((_, i) => i % 2 === 0);
   const test = comps.filter((_, i) => i % 2 === 1);
-  const blindCurve = test.map((p) => curvePredict(train, p, model));
+  const blindCurve = test.map((p) => fullPredict(train, p, snapshot.as_of, model));
   const blindFlat = test.map((p) => flatPredict(train, p, model));
   const blindActuals = test.map((p) => p.mcap_usd!);
+  const fit = fitCurve(comps);
+  const { p10, p90 } = residualRange(comps, fit);
   return {
     loo: testSummary(looCurve, actuals),
     blind: testSummary(blindCurve, blindActuals),
     flat_loo: testSummary(looFlat, actuals),
     flat_blind: testSummary(blindFlat, blindActuals),
+    residual_p10: p10,
+    residual_p90: p90,
   };
+}
+
+/** The launch likelihood: the category's own token rate times an age factor that falls from
+ * 1.0 to `age_factor_floor` over `age_decay_days` with no token. A protocol that has run
+ * three years with no token is less likely to launch one soon than a six-month-old one —
+ * the hazard intuition, stated as a model choice, not a measured rate: no future launches
+ * exist in a sealed snapshot to test it against. Unknown age uses `unknown_age_days`. */
+export function launchLikelihood(
+  protocol: SnapshotProtocol,
+  age: number | null,
+  calibration: Calibration,
+  model: ModelConstants = MODEL,
+): number {
+  const rate = launchRateFor(protocol.category, calibration);
+  const ageForModel = age ?? model.unknown_age_days;
+  const ageFactor =
+    model.age_factor_floor +
+    (1 - model.age_factor_floor) * (1 - Math.min(Math.max(ageForModel, 0), model.age_decay_days) / model.age_decay_days);
+  return Math.round(rate * ageFactor * 1000) / 1000;
 }
 
 /** The multipliers and the implied value one protocol gets under `model` and `calibration`. */
@@ -485,6 +647,7 @@ export function impliedValue(
   asOf: string,
   calibration: Calibration,
   model: ModelConstants,
+  range: { p10: number; p90: number },
 ): {
   implied: number;
   multiple: number;
@@ -495,6 +658,9 @@ export function impliedValue(
   growthMult: number;
   maturityMult: number;
   age: number | null;
+  likelihood: number;
+  rangeLo: number;
+  rangeHi: number;
 } {
   const age = ageDays(asOf, protocol.listed_at);
   const { factor, live_count } = factorFor(protocol.category, calibration);
@@ -508,6 +674,7 @@ export function impliedValue(
     model.maturity_floor +
     (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
+  const likelihood = launchLikelihood(protocol, age, calibration, model);
   return {
     implied,
     multiple: protocol.tvl_usd > 0 ? base / protocol.tvl_usd : 0,
@@ -518,6 +685,9 @@ export function impliedValue(
     growthMult,
     maturityMult,
     age,
+    likelihood,
+    rangeLo: Math.max(1, Math.round(implied * range.p10)),
+    rangeHi: Math.max(1, Math.round(implied * range.p90)),
   };
 }
 
@@ -555,15 +725,19 @@ export function buildBoard(
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   for (const p of early) chosen.set(p.slug, p);
 
+  const range = residualRange(compsOf(snapshot), calibration.fit);
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, calibration, model);
+    const v = impliedValue(p, snapshot.as_of, calibration, model, range);
     const cost = totalCostFor(p, v.age);
-    return { p, ...v, ...cost };
+    const expected = Math.round(v.likelihood * v.implied - cost.total);
+    return { p, ...v, ...cost, expected };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  // The verdict compares implied value per dollar farmed against the board's own thirds.
+  // The verdict compares EXPECTED value per dollar farmed against the board's own thirds:
+  // value alone does not say whether to farm — a fortune that never launches is worth
+  // nothing, and a modest value that probably launches beats it per dollar spent.
   const byValuePerDollar = [...scored].sort(
-    (a, b) => a.implied / a.total - b.implied / b.total || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0),
+    (a, b) => a.expected / a.total - b.expected / b.total || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0),
   );
   const verdictOf = new Map<string, Verdict>();
   byValuePerDollar.forEach((s, i) => {
@@ -600,6 +774,10 @@ export function buildBoard(
     total_cost_usd: s.total,
     capital_usd: s.capital,
     gas_total_usd: s.gasTotal,
+    launch_likelihood: s.likelihood,
+    expected_value_usd: s.expected,
+    range_lo_usd: s.rangeLo,
+    range_hi_usd: s.rangeHi,
   }));
 }
 
@@ -838,6 +1016,10 @@ export function radarRow(row: BoardRow): RadarRow {
     total_cost_usd: row.total_cost_usd,
     capital_usd: row.capital_usd,
     gas_total_usd: row.gas_total_usd,
+    launch_likelihood: row.launch_likelihood,
+    expected_value_usd: row.expected_value_usd,
+    range_lo_usd: row.range_lo_usd,
+    range_hi_usd: row.range_hi_usd,
   };
 }
 
@@ -851,6 +1033,17 @@ export function buildRadar(
   const board = buildBoard(snapshot, calibration, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
+  const boardSlugs = new Set(board.map((r) => r.slug));
+  const preToken = snapshot.protocols.filter((p) => isPreToken(p));
+  const notOnBoard = preToken.filter((p) => !boardSlugs.has(p.slug));
+  const separation = {
+    total: snapshot.protocols.length,
+    pre_token: preToken.length,
+    live_token: snapshot.protocols.length - preToken.length,
+    excluded_cex: notOnBoard.filter((p) => p.category === 'CEX').length,
+    excluded_versioned: notOnBoard.filter((p) => p.category !== 'CEX' && VERSIONED.test(p.name)).length,
+    excluded_large: notOnBoard.filter((p) => p.category !== 'CEX' && !VERSIONED.test(p.name)).length,
+  };
   const verdict_counts = {
     farm: board.filter((r) => r.verdict === 'farm').length,
     thin: board.filter((r) => r.verdict === 'thin').length,
@@ -866,6 +1059,7 @@ export function buildRadar(
     board_size: board.length,
     early_size: early,
     live_size: live.length,
+    separation,
     calibration,
     validation,
     verdict_counts,

@@ -1,4 +1,4 @@
-// Token Radar's entry program (Node 22, standard library only), model radar-2.
+// Token Radar's entry program (Node 22, standard library only), model radar-5.
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), calibrates the
 // value model from the snapshot's own live-token protocols, scores every pre-token protocol,
@@ -87,7 +87,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: curve log10(mcap) = ${calibration.fit.intercept.toFixed(4)} + ${calibration.fit.slope.toFixed(4)} x log10(tvl), ${calibration.fit.comps} comps\n` +
-    `token radar: blind test median error ${validation.blind.median_factor}x (${validation.blind.within_2x}% within 2x, Spearman ${validation.blind.spearman}), flat multiple ${validation.flat_blind.median_factor}x; LOO ${validation.loo.median_factor}x vs flat ${validation.flat_loo.median_factor}x\n` +
-    `token radar: verdicts farm ${radar.verdict_counts.farm}, thin ${radar.verdict_counts.thin}, skip ${radar.verdict_counts.skip}\n` +
+    `token radar: blind test (full predictor) median error ${validation.blind.median_factor}x (${validation.blind.within_2x}% within 2x, Spearman ${validation.blind.spearman}), flat multiple ${validation.flat_blind.median_factor}x; LOO ${validation.loo.median_factor}x vs flat ${validation.flat_loo.median_factor}x; residual p10/p90 ${validation.residual_p10}x/${validation.residual_p90}x\n` +
+    `token radar: verdicts farm ${radar.verdict_counts.farm}, thin ${radar.verdict_counts.thin}, skip ${radar.verdict_counts.skip}; top implied ${board[0]!.name} ${board[0]!.implied_value_usd}, top expected value ${[...board].sort((a, b) => b.expected_value_usd - a.expected_value_usd)[0]!.name} ${[...board].sort((a, b) => b.expected_value_usd - a.expected_value_usd)[0]!.expected_value_usd}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
