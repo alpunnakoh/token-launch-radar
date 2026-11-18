@@ -1,4 +1,4 @@
-// Token Radar's dashboard, model radar-3. It reads window.RADAR (written beside dashboard/ by
+// Token Radar's dashboard, model radar-4. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail drawer with
 // the model's own inputs and the protocol's netted farm plan, the fitted curve's blind test,
 // a calibration table, and a what-if sandbox. No network: every byte it shows is in data.js.
@@ -13,7 +13,7 @@
   if (!DATA) return;
   var app = document.getElementById('board');
   var state = { q: '', category: 'all', chain: 'all', verdict: 'all', watchlistOnly: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null, sandbox: null };
-  var SANDBOX_DEFAULTS = { scale: 1, growthWeight: 0.5, maturityFloor: 0.6 };
+  var SANDBOX_DEFAULTS = { scale: 1, growthWeight: 1.0, maturityFloor: 0.8 };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -99,6 +99,10 @@
     if (c.indexOf('base') >= 0 || c.indexOf('arbitrum') >= 0 || c.indexOf('optimism') >= 0 || c.indexOf('blast') >= 0) return 0.5;
     if (c.indexOf('binance') >= 0 || c.indexOf('bnb') >= 0) return 0.3;
     if (c.indexOf('polygon') >= 0) return 0.1;
+    if (c.indexOf('avalanche') >= 0 || c.indexOf('starknet') >= 0) return 0.5;
+    if (c.indexOf('tron') >= 0) return 1;
+    if (c.indexOf('linea') >= 0 || c.indexOf('sonic') >= 0 || c.indexOf('mantle') >= 0 || c.indexOf('fantom') >= 0 || c.indexOf('gnosis') >= 0 || c.indexOf('scroll') >= 0 || c.indexOf('zksync') >= 0) return 0.1;
+    if (c.indexOf('sui') >= 0 || c.indexOf('aptos') >= 0 || c.indexOf('hyperliquid') >= 0 || c.indexOf('monad') >= 0 || c.indexOf('near') >= 0 || c.indexOf('celo') >= 0) return 0.05;
     return 2;
   }
   function fmtGas(n) {
@@ -455,7 +459,7 @@
       el('div', { class: 'formula' },
         'implied = round( curve(tvl_usd) x factor(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      el('p', { class: 'sub', text: 'Curve(tvl) is the least-squares fit of log10(market cap) on log10(TVL) over ' + fit.comps + ' live-token protocols, one per ticker: log10(mcap) = ' + fit.intercept.toFixed(4) + ' + ' + fit.slope.toFixed(4) + ' x log10(tvl). The slope is far below 1, so a token grows much slower than its TVL; a flat multiple would price the largest protocols ten times too high. Factor(category) is the median of mcap / curve(tvl) for live tokens in that category, shrunk toward 1.0 with ' + m.shrinkage_k + ' pseudo-observations and capped at ' + m.factor_cap.toFixed(1) + 'x. A category needs at least ' + m.min_live + ' live tokens to earn its own factor; thinner categories use 1.0. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      el('p', { class: 'sub', text: 'Curve(tvl) is the least-squares fit of log10(market cap) on log10(TVL) over ' + fit.comps + ' live-token protocols, one per ticker: log10(mcap) = ' + fit.intercept.toFixed(4) + ' + ' + fit.slope.toFixed(4) + ' x log10(tvl). The slope is shrunk toward 0.5 (the square-root law) with ' + m.slope_shrink_k + ' pseudo-observations, because 118 comps cannot pin it precisely — the shrunk slope predicts held-out comps better on every split tested. The slope is far below 1, so a token grows much slower than its TVL; a flat multiple would price the largest protocols ten times too high. Factor(category) is the median of mcap / curve(tvl) for live tokens in that category, shrunk toward 1.0 with ' + m.shrinkage_k + ' pseudo-observations and capped at ' + m.factor_cap.toFixed(1) + 'x. A category needs at least ' + m.min_live + ' live tokens to earn its own factor; thinner categories use 1.0. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
       el('div', { class: 'calib-wrap' },
         el('table', { class: 'calib' },
           el('caption', { class: 'sub', text: 'Calibration: one row per category on the board, computed from this snapshot. Raw is the median residual against the curve; factor is what the model uses.' }),

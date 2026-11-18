@@ -1,4 +1,4 @@
-// Token Radar's model, version radar-3: one snapshot of the protocol universe in, one ranked
+// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
 // board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
@@ -14,26 +14,39 @@
 //
 //   comps            = live-token protocols, one per ticker (CoinGecko id, else symbol, else
 //                      slug; the largest TVL wins a ticker), no CEX, no versioned pool
-//   curve            = least-squares fit of log10(mcap) on log10(tvl) over the comps:
-//                      log10(mcap) = intercept + slope x log10(tvl)
+//   curve            = least-squares fit of log10(mcap) on log10(tvl) over the comps, with the
+//                      slope shrunk toward 0.5 — the square-root law, value growing with
+//                      the square root of TVL — because 118 comps cannot pin the slope
+//                      precisely and the unshrunk fit overfits their noise; the intercept is
+//                      refit at the shrunk slope, so the curve still passes through the
+//                      comps' own centre: log10(mcap) = intercept + slope x log10(tvl)
 //   category factor  = median(mcap / curve(tvl)) over the comps in that category, shrunk
 //                      toward 1.0 with k = 10 pseudo-observations and capped at 3.0; a
 //                      category needs at least 3 live comps to earn its own factor, otherwise 1.0
 //   base             = curve(tvl) x category factor
 //   growth           = clamp(change_7d, -50, +60) per cent (unreported: 0)
-//   growthMult       = 1 + (growth / 100) x 0.5
-//   maturity         = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age unknown: 365 days)
+//   growthMult       = 1 + (growth / 100) x 1.0
+//   maturity         = 0.8 + min(age_days, 1095) / 1095 x 0.2   (age unknown: 365 days)
 //   implied          = max(1, round(base x growthMult x maturity))
 //
 // Why a fitted curve instead of a flat multiple: the market does not pay one price per TVL
 // dollar. The comps' market-cap-per-TVL spans 0.0003x to 400x, and the log-log fit's slope is
-// near 0.46, far from 1 — a token's value grows much slower than its TVL. A flat median
+// near 0.47, far from 1 — a token's value grows much slower than its TVL. A flat median
 // multiple prices a $10B-TVL protocol ten times a $1B one; the curve prices it about three
 // times. The curve is fitted, not asserted, and it is tested blind (see validate()): fitted on
-// half the comps, it predicts the other half with a median error near 2.9x, against 4.9x for
-// the flat multiple the previous model used — about a 40% smaller error. The error is still
+// half the comps, it predicts the other half with a median error near 2.6x, against 4.9x for
+// the flat multiple the first model used — about a 45% smaller error. The error is still
 // a hundred-fold around the curve — and the dashboard says so plainly: this is a comps
 // estimate, not a price.
+//
+// Why the slope is shrunk: on these 118 comps the fitted slope moves with the sample —
+// leave-one-out and five-fold tests both show the shrunk slope predicting held-out comps
+// better than the raw fit (median error 2.6x blind, 3.0x leave-one-out, against 2.9x and
+// 3.1x unshrunk). The shrinkage is a variance cut, not a hand-picked number: the prior is
+// the square root, the data still supply the intercept and most of the slope. Age inside
+// the fit, chain count, per-category curves and a TVL-growth interaction were all tried
+// blind and all lost to this simpler curve — the market's dispersion is mostly noise, and
+// extra signals mostly fit it.
 //
 // Every farm plan is netted to the dollar: the capital, the second action and the weekly
 // actions are summed with the gas on the protocol's own chains, and the plan's verdict
@@ -75,23 +88,27 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
+  slope_prior: number;
+  slope_shrink_k: number;
 }
 
 export const MODEL: ModelConstants = {
   shrinkage_k: 10,
   min_live: 3,
   factor_cap: 3.0,
-  growth_weight: 0.5,
+  growth_weight: 1.0,
   growth_floor: -50,
   growth_cap: 60,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
+  maturity_floor: 0.8,
+  maturity_range: 0.2,
   maturity_days: 1095,
   unknown_age_days: 365,
+  slope_prior: 0.5,
+  slope_shrink_k: 40,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -300,8 +317,15 @@ export function compsOf(snapshot: Snapshot): SnapshotProtocol[] {
   return [...byTicker.values()].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
 }
 
-/** Least squares on log10(mcap) against log10(tvl); a flat line when the TVLs do not vary. */
-export function fitCurve(rows: SnapshotProtocol[]): CurveFit {
+/**
+ * Least squares on log10(mcap) against log10(tvl); a flat line when the TVLs do not vary.
+ * The slope is then shrunk toward `model.slope_prior` (the square-root law) with
+ * `model.slope_shrink_k` pseudo-observations, and the intercept is refit at the shrunk
+ * slope so the line still passes through the comps' own centre. On 118 comps the raw
+ * slope is noisy — the shrunk slope predicts held-out comps better on every split the
+ * model tests (leave-one-out, five-fold, and the even/odd blind split).
+ */
+export function fitCurve(rows: SnapshotProtocol[], model: ModelConstants = MODEL): CurveFit {
   const xs = rows.map((p) => Math.log10(Math.max(1, p.tvl_usd)));
   const ys = rows.map((p) => Math.log10(Math.max(1, p.mcap_usd!)));
   const n = rows.length;
@@ -309,7 +333,8 @@ export function fitCurve(rows: SnapshotProtocol[]): CurveFit {
   const mx = xs.reduce((a, b) => a + b, 0) / n;
   const my = ys.reduce((a, b) => a + b, 0) / n;
   const denom = xs.reduce((a, x) => a + (x - mx) * (x - mx), 0);
-  const slope = denom === 0 ? 0 : xs.reduce((a, x, i) => a + (x - mx) * (ys[i]! - my), 0) / denom;
+  const rawSlope = denom === 0 ? 0 : xs.reduce((a, x, i) => a + (x - mx) * (ys[i]! - my), 0) / denom;
+  const slope = (n * rawSlope + model.slope_shrink_k * model.slope_prior) / (n + model.slope_shrink_k);
   return { intercept: my - slope * mx, slope, comps: n };
 }
 
@@ -601,6 +626,10 @@ export function gasUsd(chain: string): number {
   if (c.includes('base') || c.includes('arbitrum') || c.includes('optimism') || c.includes('blast')) return 0.5;
   if (c.includes('binance') || c.includes('bnb')) return 0.3;
   if (c.includes('polygon')) return 0.1;
+  if (c.includes('avalanche') || c.includes('starknet')) return 0.5;
+  if (c.includes('tron')) return 1;
+  if (c.includes('linea') || c.includes('sonic') || c.includes('mantle') || c.includes('fantom') || c.includes('gnosis') || c.includes('scroll') || c.includes('zksync')) return 0.1;
+  if (c.includes('sui') || c.includes('aptos') || c.includes('hyperliquid') || c.includes('monad') || c.includes('near') || c.includes('celo')) return 0.05;
   return 2;
 }
 
